@@ -147,7 +147,6 @@ The codebase is a **single-binary streaming pipeline**. One goroutine reads one 
 
 ```
 stdin ─► Ingestor ─► Sliding Window ─► Analyzer ─► Predictor ─► Renderer ─► stdout
-        (parse)     (state, evict)   (stats)     (blend+tier)  (round+format)
 ```
 
 | Stage      | Responsibility |
