@@ -332,6 +332,119 @@ func TestEdgeOscillatingValues(t *testing.T) {
 	}
 }
 
+func TestDynamicMultiplier(t *testing.T) {
+	cases := []struct {
+		name string
+		std  float64
+		want float64
+	}{
+		{"very low", 1.0, veryLowMultiplier},
+		{"low (boundary)", veryLowVarThreshold, aggroMultiplier},
+		{"low", 10.0, aggroMultiplier},
+		{"balanced (boundary)", lowVarThreshold, balancedMultiplier},
+		{"balanced", 30.0, balancedMultiplier},
+		{"defensive (boundary)", highVarThreshold, defensiveMultiplier},
+		{"defensive", 50.0, defensiveMultiplier},
+		{"extreme (boundary)", extremeVarThreshold, extremeMultiplier},
+		{"extreme", 200.0, extremeMultiplier},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := dynamicMultiplier(tc.std); got != tc.want {
+				t.Errorf("dynamicMultiplier(%v)=%v; want %v", tc.std, got, tc.want)
+			}
+		})
+	}
+}
+
+// fillWindow streams a slice through applyInput, returning the final state.
+func fillWindow(t *testing.T, values []float64, useMedian bool) ([]float64, int) {
+	t.Helper()
+	window := make([]float64, 0, WindowSize)
+	seen := 0
+	for _, v := range values {
+		window, seen, _, _ = applyInput(window, seen, v, useMedian)
+	}
+	return window, seen
+}
+
+func TestPredictLowRFallback(t *testing.T) {
+	// Oscillating window → PearsonCorrelation ≈ 0, so the hybrid blend
+	// collapses to the robust center and the multiplier scaling factor
+	// (1 - 0.25*|r|) is ~1. The range must encompass both extremes.
+	values := []float64{10, 100, 10, 100, 10, 100, 10, 100, 10, 100}
+	window, _ := fillWindow(t, values, true)
+
+	r := PearsonCorrelation(window)
+	if math.Abs(r) > 0.2 {
+		t.Fatalf("setup: oscillating window should have |r| ≈ 0, got %v", r)
+	}
+
+	l, u := Predict(window, len(window), 100, true)
+	if int64(10) < l || int64(100) > u {
+		t.Errorf("low-|r| fallback: bounds [%d,%d] must encompass 10 and 100", l, u)
+	}
+}
+
+func TestPredictHighRTightening(t *testing.T) {
+	// Clean linear trend → |r| ≈ 1. The hybrid centre tracks the regression
+	// extrapolation and the multiplier is scaled by (1 - 0.25*|r|) ≈ 0.75,
+	// producing a tighter band than the same window with |r| forced to 0.
+	values := []float64{100, 101, 102, 103, 104, 105, 106, 107, 108, 109}
+	window, _ := fillWindow(t, values, true)
+
+	r := PearsonCorrelation(window)
+	if r < 0.99 {
+		t.Fatalf("setup: trended window should have |r| ≈ 1, got %v", r)
+	}
+
+	l, u := Predict(window, len(window), 110, true)
+	width := u - l
+	if width > 6 {
+		t.Errorf("high-|r| tightening: band width %d unexpectedly wide (expected ≤ 6)", width)
+	}
+	if int64(110) < l || int64(110) > u {
+		t.Errorf("high-|r| tightening: bounds [%d,%d] should encompass next value 110", l, u)
+	}
+}
+
+func TestPredictMidRBlend(t *testing.T) {
+	// Trended-but-noisy data → 0.4 < |r| < 0.95. The blended centre should
+	// sit strictly between the pure median and the pure regression
+	// extrapolation, exercising the blend path.
+	values := []float64{100, 102, 99, 105, 103, 108, 106, 110, 108, 112}
+	window, _ := fillWindow(t, values, true)
+
+	r := PearsonCorrelation(window)
+	if math.Abs(r) < 0.4 || math.Abs(r) > 0.95 {
+		t.Fatalf("setup: mid-correlation window should have 0.4 < |r| < 0.95, got %v", r)
+	}
+
+	l, u := Predict(window, len(window), 113, true)
+	if u-l < int64(minWidth) {
+		t.Errorf("mid-|r| blend: bounds [%d,%d] violate minWidth", l, u)
+	}
+}
+
+func TestPredictConstantWindowZeroR(t *testing.T) {
+	// All-equal window: PearsonCorrelation returns 0 (constant-y guard),
+	// StdDev is 0, margin floored to minStdRange. Centre = constant value.
+	values := []float64{80, 80, 80, 80, 80}
+	window, _ := fillWindow(t, values, true)
+
+	if r := PearsonCorrelation(window); r != 0 {
+		t.Fatalf("setup: constant window should have r = 0, got %v", r)
+	}
+	if std := StdDev(window); std != 0 {
+		t.Fatalf("setup: constant window should have std = 0, got %v", std)
+	}
+
+	l, u := Predict(window, len(window), 80, true)
+	if l != 78 || u != 82 {
+		t.Errorf("constant-window-r=0: got %d %d; want 78 82", l, u)
+	}
+}
+
 func TestRoundBounds(t *testing.T) {
 	cases := []struct {
 		name  string

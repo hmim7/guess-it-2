@@ -49,28 +49,7 @@ func Predict(window []float64, seen int, current float64, useMedian bool) (int64
 	center := w*regC + (1-w)*robC
 	std := StdDev(window)
 
-	// Use a dynamic multiplier based on data volatility (standard deviation).
-	// This allows us to be aggressive in stable periods and defensive in volatile ones,
-	// improving the score without sacrificing too much hit rate.
-	var dynamicMultiplier float64
-	if std < veryLowVarThreshold {
-		// Extremely stable data: take a big risk for a massive score.
-		dynamicMultiplier = veryLowMultiplier
-	} else if std < lowVarThreshold {
-		// Low variance: tighten the range for a higher score.
-		dynamicMultiplier = aggroMultiplier
-	} else if std < highVarThreshold {
-		// Medium variance: a balanced approach.
-		dynamicMultiplier = balancedMultiplier
-	} else if std < extremeVarThreshold {
-		// High variance: a defensive approach to ensure a hit.
-		dynamicMultiplier = defensiveMultiplier
-	} else {
-		// Extreme variance: play it very safe to avoid a miss on huge spikes.
-		dynamicMultiplier = extremeMultiplier
-	}
-
-	margin := dynamicMultiplier * std * (1 - 0.25*w)
+	margin := dynamicMultiplier(std) * std * (1 - 0.25*w)
 	if margin < minStdRange {
 		margin = minStdRange
 	}
@@ -82,6 +61,23 @@ func Predict(window []float64, seen int, current float64, useMedian bool) (int64
 		}
 	}
 	return roundBounds(center-margin, center+margin)
+}
+
+// dynamicMultiplier picks the StdDev tier coefficient: aggressive when the data
+// is stable, defensive when it is volatile.
+func dynamicMultiplier(std float64) float64 {
+	switch {
+	case std < veryLowVarThreshold:
+		return veryLowMultiplier
+	case std < lowVarThreshold:
+		return aggroMultiplier
+	case std < highVarThreshold:
+		return balancedMultiplier
+	case std < extremeVarThreshold:
+		return defensiveMultiplier
+	default:
+		return extremeMultiplier
+	}
 }
 
 // roundBounds converts calculated floating-point boundaries into nearest integers.
