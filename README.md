@@ -14,6 +14,7 @@ A real-time statistical prediction engine written in Go. The program reads a con
 - **Sliding Window** — fixed-size (`N = 20`) localized state, adapts to sudden trend changes.
 - **Hybrid Predictor** — blends linear-regression extrapolation with the median + 5-tier StdDev model, weighted by `|PearsonCorrelation|`.
 - **Dynamic Risk Profile** — five-tier multiplier (**Very Aggressive → Extreme**), additionally scaled by `1 − 0.25·|r|` so a clean trend tightens the band.
+- **Adaptive Hit %-Targeting Controller** — closed-loop scaler that tracks realised Hit % over a rolling 30-prediction window and nudges the margin toward `PREDICT_TARGET_HIT` (default `0.30`). Set `PREDICT_ADAPT=off` to disable.
 - **Safeguards** — `minStdRange = 1.8`, `minWidth = 1`, wide initial range for `seen < 5`, jump-guard for outliers `> 1.5σ` from centre.
 
 ## Installation
@@ -89,11 +90,23 @@ mul    := dynamicMultiplier(std) · (1 − 0.25·w)
 margin := max(mul·std, minStdRange)
 if |current − center| > 1.5·std:
     margin = max(margin, |current − center|·1.1)   # jump guard
+margin *= multAdjust                                # adaptive Hit %-controller scaler
 
 print roundBounds(center − margin, center + margin)
 ```
 
 When `|r| ≈ 1` (clean trend), the centre tracks the regression line and the multiplier shrinks ~25 % → tighter, higher-scoring range. When `|r| ≈ 0` (oscillating or noisy data), the centre collapses to the median and the multiplier is untouched → wider, safer range.
+
+### Adaptive Hit %-Targeting Controller
+
+After each prediction, the `AdaptivePredictor` compares the actual `current` against the previous `[lower, upper]`, records the hit/miss into a 30-slot ring buffer, and updates a global `multAdjust ∈ [0.3, 2.0]` via proportional control:
+
+```
+err        := recentHitRate − targetHit                 # targetHit = PREDICT_TARGET_HIT (default 0.30)
+multAdjust *= 1 − learnRate·err                         # learnRate = 0.15
+```
+
+Higher-than-target Hit % shrinks `multAdjust` (tighter bands, higher score per hit); lower-than-target widens it. The controller composes on top of the 5-tier multipliers — tier semantics are preserved, the scaler is a meta-knob. See [TUNING.md § 4](TUNING.md) for derivation and benchmarking guidance.
 
 ### Math Reference
 
@@ -126,6 +139,10 @@ Through benchmarking against opponent algorithms (`big-range`, `linear-regr`, `c
   - Balanced (`std < 40.0`): `1.8`
   - Defensive (`std < 80.0`): `2.1`
   - Extreme (`std ≥ 80.0`): `2.4`
+- **Adaptive Controller:**
+  - `PREDICT_TARGET_HIT` (default `0.30`, clamped to `[0.1, 0.95]`) — target realised Hit %.
+  - `PREDICT_ADAPT=off` — disables the controller; predictor reverts to the static 5-tier baseline.
+  - Window size: `30` predictions · Learning rate: `0.15` · Scaler bounds: `[0.3, 2.0]`.
 
 ---
 
@@ -171,11 +188,11 @@ guess-it-2/
 ├── README.md                     # This file
 ├── linearstats/                  # Statistical + prediction core
 │   ├── stats.go                  # Average, Median, Variance, StdDev, LinearRegression, PearsonCorrelation
-│   ├── predict.go                # Hybrid Predict(), dynamicMultiplier(), roundBounds(), tuning constants
+│   ├── predict.go                # Hybrid Predict(), AdaptivePredictor, dynamicMultiplier(), tuning constants
 │   └── linearstats_test.go       # Table-driven stats + predictor coverage (≥ 95 %)
 ├── student/                      # Auditor artefacts
 │   ├── guess-it-2                # Linux/amd64 binary (cross-compiled)
-│   └── script.sh                 # Launcher: exports PREDICT_CENTER=median
+│   └── script.sh                 # Launcher: exports PREDICT_CENTER=median, PREDICT_TARGET_HIT=0.30
 ├── docs/
 │   ├── PRD.md                    # Product requirements & architecture
 │   ├── audit_cases.md            # Audit procedure & success criteria
@@ -216,7 +233,36 @@ systemctl --user enable --now podman.socket
 systemctl --user status podman.socket    # Expected: Active: active (listening)
 ```
 
-### Step 3 — Build and run the container
+### Step 3 — Place the student artifacts
+
+Download the [dockerized tester](https://assets.01-edu.org/guess-it/guess-it-dockerized.zip) if you don't have it yet:
+
+```bash
+curl -L https://assets.01-edu.org/guess-it/guess-it-dockerized.zip -o guess-it-dockerized.zip
+unzip guess-it-dockerized.zip
+```
+
+The dockerized tester expects the `student/` folder (binary + `script.sh`) to be present inside `guess-it-dockerized/`. The layout must be:
+
+```
+guess-it-dockerized/
+├── ai/
+│   ├── big-range
+│   └── ...
+├── index.html
+├── index.js
+└── student/
+    ├── guess-it-2      # Linux/amd64 binary from Step 1
+    └── script.sh
+```
+
+Copy or symlink from the repo root:
+
+```bash
+cp -r student/ guess-it-dockerized/student/
+```
+
+### Step 4 — Build and run the container
 
 ```bash
 cd guess-it-dockerized
@@ -225,13 +271,28 @@ docker compose up --build
 
 Open the browser at `http://localhost:3000`.
 
+### Step 5 — Run a test against an opponent
+
+The tester requires an opponent AI to compare against. Append `?guesser=<name>` to the URL, where `<name>` is any file in the `ai/` folder:
+
+```
+http://localhost:3000/?guesser=big-range
+http://localhost:3000/?guesser=correlation-coef
+```
+
+Select a **Test Data** set, then click **Quick** to skip the animation and jump straight to the final scores. Click **Clean** to reset the display before the next run.
+
+Recommended opponents for the audit: `big-range`, `linear-regr`, `correlation-coef`, plus bonus `mse` and `nic`.
+
 ### Quick-reference checklist
 
 - [ ] Binary rebuilt for Linux: `GOOS=linux GOARCH=amd64 go build -o student/guess-it-2 .`
 - [ ] Executable bits set: `chmod +x student/guess-it-2 student/script.sh`
+- [ ] `student/` copied into `guess-it-dockerized/student/`
 - [ ] Podman socket running: `systemctl --user start podman.socket`
 - [ ] Container started: `cd guess-it-dockerized && docker compose up --build`
-- [ ] Test on `Data 4` and `Data 5` against `big-range`, `linear-regr`, `correlation-coef`, plus bonus `mse` and `nic`
+- [ ] Test on `Data 4` and `Data 5` with `?guesser=correlation-coef` (primary) and others
+- [ ] Use **Quick** to fast-forward; **Clean** between runs
 
 ### Troubleshooting
 
@@ -239,6 +300,7 @@ Open the browser at `http://localhost:3000`.
 | --- | --- | --- |
 | `Exec format error` | Binary compiled for wrong OS | Redo Step 1 |
 | `no such file or directory` (socket) | Podman socket not started | Redo Step 2 |
+| Console: "need another guesser" | No `?guesser=` param in URL | Add `?guesser=big-range` to the URL |
 | `version` obsolete warning in compose | `version:` key in `docker-compose.yml` is deprecated | Safe to ignore — warning, not an error |
 | Port 3000 already in use | Another process is bound to 3000 | `lsof -i :3000` then kill the process |
 
@@ -250,6 +312,7 @@ Open the browser at `http://localhost:3000`.
 - [Edge Cases](docs/edge_cases.md) — streaming, statistical, and hybrid-predictor edges
 - [Golden Tests](docs/golden_tests.md) — single source of truth for expected behaviour
 - [PRD](docs/PRD.md) — product requirements & architecture (with Mermaid flowchart)
+- [Tuning Guide](TUNING.md) — directional effect of each `predict.go` constant on Score vs. Hit %
 - [Task Cards](tasks/) — implementation breakdown
 - [AI Usage Log](.ai/hmim.ai.log) — record of AI-assisted development sessions
 
