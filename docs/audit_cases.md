@@ -33,12 +33,12 @@ The program is audited by competing against a series of benchmark "guesser" prog
 - **Datasets:** `Data 4`, `Data 5`.
 - **Procedure:** Run the test 3 times per dataset.
 - **Expected Behavior:** Student score > opponent score in ≥ 2 of 3 runs for each dataset.
-- **Why the hybrid predictor wins:** when `|r|` is high, the student's centre tracks the regression line just as closely; when the trend breaks (`|r|` drops), the student falls back to the median + 5-tier multiplier, which `linear-regr` cannot do.
+- **Why the fixed-range predictor wins:** the student centres on the same regression line, but its constant ±20 range is far narrower than a defensively-sized opponent range, so each correct guess scores higher.
 
 ---
 
 ## Audit Case 3: `correlation-coef` Opponent
-**Description:** Modulates its range using the Pearson correlation coefficient. The student must use `|r|` more aggressively — both to tighten when the trend is clean and to widen when it decays.
+**Description:** Modulates its range using the Pearson correlation coefficient. The student wins by holding a constant narrow ±20 range — score-per-hit stays high regardless of how the opponent sizes its band.
 
 - **Opponent:** `?guesser=correlation-coef`
 - **Datasets:** `Data 4`, `Data 5`.
@@ -58,7 +58,7 @@ The program is audited by competing against a series of benchmark "guesser" prog
 ---
 
 ## Audit Case 5: `nic` Opponent (Bonus)
-**Description:** Reference adaptive opponent. Winning requires the dynamic multiplier to scale both with `stdDev` (tiers) and with `|r|` (correlation scaling).
+**Description:** Reference adaptive opponent. The student relies on the fixed ±20 width keeping score-per-hit high enough to out-score an adaptively-sized opponent range.
 
 - **Opponent:** `?guesser=nic`
 - **Datasets:** `Data 4`, `Data 5`.
