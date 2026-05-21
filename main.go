@@ -13,14 +13,15 @@ import (
 
 // main runs the prediction loop and exits with a non-zero status on error.
 func main() {
-	if err := run(os.Stdin, os.Stdout, os.Getenv("PREDICT_CENTER")); err != nil {
+	if err := run(os.Stdin, os.Stdout); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
 }
 
-// run reads numbers from r line-by-line, writes the predicted bounds for each next value to w.
-func run(r io.Reader, w io.Writer, centerMode string) error {
+// run reads numbers from r line-by-line and writes the predicted bounds for
+// each next value to w.
+func run(r io.Reader, w io.Writer) error {
 	in := bufio.NewScanner(r)
 	in.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	out := bufio.NewWriter(w)
@@ -28,7 +29,6 @@ func run(r io.Reader, w io.Writer, centerMode string) error {
 
 	window := make([]float64, 0, linearstats.WindowSize)
 	seen := 0
-	useMedian := strings.EqualFold(centerMode, "median")
 
 	for in.Scan() {
 		line := strings.TrimSpace(in.Text())
@@ -46,7 +46,7 @@ func run(r io.Reader, w io.Writer, centerMode string) error {
 		} else {
 			window = append(window[1:], v)
 		}
-		lower, upper := linearstats.Predict(window, seen, v, useMedian)
+		lower, upper := linearstats.Predict(window, seen, v)
 		if _, err := fmt.Fprintf(out, "%d %d\n", lower, upper); err != nil {
 			return err
 		}

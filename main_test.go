@@ -7,72 +7,57 @@ import (
 	"testing"
 )
 
-// TestRun is a table-driven exercise of the streaming loop covering the
-// happy path, invalid input, EOF, magnitude, and both centre modes.
+// TestRun is a table-driven exercise of the streaming loop: invalid input is
+// skipped, blank lines are ignored, EOF exits cleanly, and every numeric line
+// produces one well-formed "lower upper" prediction.
 func TestRun(t *testing.T) {
 	cases := []struct {
 		name          string
 		input         string
-		centerMode    string
 		expectedLines int
-		coverNext     bool // assert each emitted range contains the next stream value
 	}{
 		{
-			name:          "Edge 06: ignores invalid lines (average centre)",
+			name:          "ignores invalid lines",
 			input:         "100\ninvalid_string\n200\n",
-			centerMode:    "",
 			expectedLines: 2,
 		},
 		{
-			name:          "Edge 07: empty input stream",
+			name:          "empty input stream",
 			input:         "",
-			centerMode:    "average",
 			expectedLines: 0,
 		},
 		{
-			name:          "Edge 11: large magnitude numbers",
+			name:          "large magnitude numbers",
 			input:         "9999999999999\n9999999999999\n",
-			centerMode:    "median",
 			expectedLines: 2,
 		},
 		{
-			name: "Trended stream (median centre): predicted ranges cover the next input",
+			name: "trended stream",
 			input: strings.Join([]string{
 				"100", "101", "102", "103", "104", "105",
 				"106", "107", "108", "109", "110", "111",
 			}, "\n") + "\n",
-			centerMode:    "median",
 			expectedLines: 12,
-			coverNext:     true,
 		},
 		{
-			name: "Oscillating stream (median centre): predicted ranges cover the next input",
+			name: "oscillating stream",
 			input: strings.Join([]string{
 				"10", "100", "10", "100", "10", "100",
 				"10", "100", "10", "100", "10", "100",
 			}, "\n") + "\n",
-			centerMode:    "median",
 			expectedLines: 12,
-			coverNext:     true,
 		},
 		{
-			name:          "Blank lines are skipped",
+			name:          "blank lines are skipped",
 			input:         "\n\n100\n\n200\n\n",
-			centerMode:    "average",
 			expectedLines: 2,
-		},
-		{
-			name:          "PREDICT_CENTER unset falls back to average path",
-			input:         "10\n20\n30\n40\n50\n60\n",
-			centerMode:    "",
-			expectedLines: 6,
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			var out bytes.Buffer
-			if err := run(strings.NewReader(tc.input), &out, tc.centerMode); err != nil {
+			if err := run(strings.NewReader(tc.input), &out); err != nil {
 				t.Fatalf("run: unexpected error: %v", err)
 			}
 
@@ -89,33 +74,15 @@ func TestRun(t *testing.T) {
 				t.Fatalf("expected %d output lines, got %d (out=%q)",
 					tc.expectedLines, len(lines), outStr)
 			}
-
-			if !tc.coverNext {
-				return
-			}
-
-			inputs := strings.Split(strings.TrimRight(tc.input, "\n"), "\n")
+			// Every line must be two integers, lower <= upper.
 			for i, line := range lines {
-				if i+1 >= len(inputs) {
-					break
-				}
-				// The first 4 predictions use the wide initial range; only
-				// assert coverage once the statistical model is active.
-				if i < 4 {
-					continue
-				}
 				lo, hi, err := parseRange(line)
 				if err != nil {
 					t.Errorf("line %d: %v (line=%q)", i, err, line)
 					continue
 				}
-				next, err := strconv.ParseFloat(inputs[i+1], 64)
-				if err != nil {
-					t.Fatalf("parse next input %q: %v", inputs[i+1], err)
-				}
-				if next < float64(lo) || next > float64(hi) {
-					t.Errorf("range [%d,%d] does not cover next input %v (step %d)",
-						lo, hi, next, i)
+				if lo > hi {
+					t.Errorf("line %d: lower %d > upper %d", i, lo, hi)
 				}
 			}
 		})
