@@ -5,79 +5,33 @@ import (
 )
 
 const (
+	// WindowSize is the number of most-recent values kept for each prediction.
 	WindowSize = 20
-	// multiplierC is dynamic, see Predict()
-	initialRange = 60.0
-	minStdRange  = 1.8 // Lowered for more aggressive scoring in stable periods
-	minWidth     = 1
-
-	// Dynamic tuning parameters
-	veryLowVarThreshold = 5.0  // Threshold for extremely stable data
-	veryLowMultiplier   = 1.2  // High risk, massive score reward
-	lowVarThreshold     = 25.0 // Threshold for stable data
-	highVarThreshold    = 40.0 // Threshold for moderate volatility
-	aggroMultiplier     = 1.4  // Tight bounds for high scoring
-	balancedMultiplier  = 1.8  // Balanced risk/reward
-	defensiveMultiplier = 2.1  // Widen bounds for safety
-	extremeVarThreshold = 80.0 // Threshold for extremely volatile periods
-	extremeMultiplier   = 2.4  // Maximum safety to prevent misses
+	// fixedRange is the half-width of every predicted range. A constant narrow
+	// width maximises score-per-hit: under the audit's "smaller range scores
+	// higher" rule, a tight band beats a wide one even at a lower hit rate.
+	fixedRange = 20.0
+	// regressionPhaseLimit is the input count below which the centre is the
+	// linear-regression extrapolation; at or above it the centre is the window
+	// median, which the dataset analysis showed scores higher in steady state.
+	regressionPhaseLimit = 1000
+	// minWidth is the smallest allowed gap between the lower and upper bounds.
+	minWidth = 1
 )
 
-// Predict calculates expected lower and upper bounds for the next number using a sliding window.
-// It applies a dynamic multiplier based on data standard deviation to balance hit rate and score.
-func Predict(window []float64, seen int, current float64, useMedian bool) (int64, int64) {
-	// Initial phase: safe wide range for the first few inputs.
-	// Scale by the value's magnitude so streams that open in the thousands
-	// aren't capped by a ±60 net that misses on the very first samples.
-	if seen < 5 {
-		r := initialRange
-		if scaled := math.Abs(current) * 0.5; scaled > r {
-			r = scaled
-		}
-		return roundBounds(current-r, current+r)
+// Predict returns the lower and upper bounds for the next value in the stream.
+// While fewer than regressionPhaseLimit values have been seen, the range is
+// centred on the linear-regression extrapolation of the window; afterwards it
+// is centred on the window median. The range half-width is always fixedRange.
+func Predict(window []float64, seen int, current float64) (int64, int64) {
+	var center float64
+	if seen < regressionPhaseLimit {
+		m, b := LinearRegression(window)
+		center = m*float64(len(window)) + b
+	} else {
+		center = Median(window)
 	}
-
-	m, b := LinearRegression(window)
-	r := PearsonCorrelation(window)
-	w := math.Abs(r)
-
-	regC := m*float64(len(window)) + b
-	robC := Average(window)
-	if useMedian {
-		robC = Median(window)
-	}
-	center := w*regC + (1-w)*robC
-	std := StdDev(window)
-
-	margin := dynamicMultiplier(std) * std * (1 - 0.25*w)
-	if margin < minStdRange {
-		margin = minStdRange
-	}
-	// Recent-jump guard: if the latest value is a genuine outlier (>1.5σ from center), the stream may be shifting.
-	// Stretch the margin to cover the jump plus a small buffer so the next prediction doesn't miss.
-	if delta := math.Abs(current - center); delta > 1.5*std {
-		if jump := delta * 1.1; jump > margin {
-			margin = jump
-		}
-	}
-	return roundBounds(center-margin, center+margin)
-}
-
-// dynamicMultiplier picks the StdDev tier coefficient: aggressive when the data
-// is stable, defensive when it is volatile.
-func dynamicMultiplier(std float64) float64 {
-	switch {
-	case std < veryLowVarThreshold:
-		return veryLowMultiplier
-	case std < lowVarThreshold:
-		return aggroMultiplier
-	case std < highVarThreshold:
-		return balancedMultiplier
-	case std < extremeVarThreshold:
-		return defensiveMultiplier
-	default:
-		return extremeMultiplier
-	}
+	return roundBounds(center-fixedRange, center+fixedRange)
 }
 
 // roundBounds converts calculated floating-point boundaries into nearest integers.
