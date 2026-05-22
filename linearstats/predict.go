@@ -5,24 +5,14 @@ import (
 )
 
 const (
-	// WindowSize is the number of most-recent values kept for each prediction.
-	WindowSize = 20
-	// fixedRange is the half-width of every predicted range. A constant narrow
-	// width maximises score-per-hit: under the audit's "smaller range scores
-	// higher" rule, a tight band beats a wide one even at a lower hit rate.
-	fixedRange = 20.0
-	// regressionPhaseLimit is the input count below which the centre is the
-	// linear-regression extrapolation; at or above it the centre is the window
-	// median, which the dataset analysis showed scores higher in steady state.
-	regressionPhaseLimit = 1000
-	// minWidth is the smallest allowed gap between the lower and upper bounds.
-	minWidth = 1
+	WindowSize           = 20   // most-recent values kept per prediction
+	fixedRange           = 20.0 // half-width of predicted range (narrow = higher score)
+	regressionPhaseLimit = 1000 // below: regression centre; at/above: median centre
+	minWidth             = 1    // minimum gap between lower and upper bounds
 )
 
-// Predict returns the lower and upper bounds for the next value in the stream.
-// While fewer than regressionPhaseLimit values have been seen, the range is
-// centred on the linear-regression extrapolation of the window; afterwards it
-// is centred on the window median. The range half-width is always fixedRange.
+// Predict returns [lower, upper] for the next value: regression-centred below
+// regressionPhaseLimit inputs, median-centred above; half-width is fixedRange.
 func Predict(window []float64, seen int, current float64) (int64, int64) {
 	var center float64
 	if seen < regressionPhaseLimit {
