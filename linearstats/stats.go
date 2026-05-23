@@ -86,6 +86,42 @@ func LinearRegression(data []float64) (m, b float64) {
 	return m, b
 }
 
+// RunningOLS accumulates (x, y) pairs and yields the least-squares line in
+// O(1) per call. Used by the stateful predictor so the trend is fit on the
+// full prefix rather than a fixed 20-point window.
+type RunningOLS struct {
+	n                        int
+	sumX, sumY, sumXY, sumXX float64
+}
+
+// Add includes one observation in the running sums.
+func (o *RunningOLS) Add(x, y float64) {
+	o.n++
+	o.sumX += x
+	o.sumY += y
+	o.sumXY += x * y
+	o.sumXX += x * x
+}
+
+// N returns the number of observations seen so far.
+func (o *RunningOLS) N() int { return o.n }
+
+// Fit returns slope and intercept of the least-squares line, plus ok=false if
+// the fit is degenerate (fewer than 2 points or a constant x).
+func (o *RunningOLS) Fit() (m, b float64, ok bool) {
+	if o.n < 2 {
+		return 0, 0, false
+	}
+	fn := float64(o.n)
+	denom := fn*o.sumXX - o.sumX*o.sumX
+	if denom == 0 {
+		return 0, o.sumY / fn, false
+	}
+	m = (fn*o.sumXY - o.sumX*o.sumY) / denom
+	b = (o.sumY - m*o.sumX) / fn
+	return m, b, true
+}
+
 // PearsonCorrelation returns r, the Pearson correlation coefficient,
 // where x = [0, 1, ..., n-1] and y = data values.
 // Returns 0 for edge cases: n<=1, constant y, or overflow in the denominator.

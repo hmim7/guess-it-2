@@ -27,8 +27,7 @@ func run(r io.Reader, w io.Writer) error {
 	out := bufio.NewWriter(w)
 	defer func() { _ = out.Flush() }()
 
-	window := make([]float64, 0, linearstats.WindowSize)
-	seen := 0
+	predictor := linearstats.NewPredictor()
 
 	for in.Scan() {
 		line := strings.TrimSpace(in.Text())
@@ -40,13 +39,7 @@ func run(r io.Reader, w io.Writer) error {
 			continue
 		}
 
-		seen++
-		if len(window) < linearstats.WindowSize {
-			window = append(window, v)
-		} else {
-			window = append(window[1:], v)
-		}
-		lower, upper := linearstats.Predict(window, seen, v)
+		lower, upper := predictor.Next(v)
 		if _, err := fmt.Fprintf(out, "%d %d\n", lower, upper); err != nil {
 			return err
 		}
