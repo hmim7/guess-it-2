@@ -1,8 +1,9 @@
 # guess-it-2
 
-![Go Version](https://img.shields.io/badge/Go-00ADD8?style=for-the-badge&logo=go&logoColor=white)
-![DOCKER](https://img.shields.io/badge/Docker-2496ED?style=for-the-badge&logo=docker&logoColor=white)
 ![MIT](https://img.shields.io/badge/MIT-1BB581?style=for-the-badge&logo=opensourceinitiative&logoColor=white)
+![Go Version](https://img.shields.io/badge/Go-00ADD8?style=for-the-badge&logo=go&logoColor=white)
+![DOCKER TESTER](https://img.shields.io/badge/Docker%20Tester-2496ED?style=for-the-badge&logo=docker&logoColor=white)
+![BASH](https://img.shields.io/badge/BASH-121011?style=for-the-badge&logo=gnu-bash&logoColor=white)
 ![Coverage](https://img.shields.io/badge/Coverage-96.3%25-2ECC71?&labelColor=181717&style=for-the-badge&logo=codecov&logoColor=white)
 [![Zone01](https://img.shields.io/badge/zone01-Athens-916ADE?&labelColor=181717&style=for-the-badge&logo=data:image/svg%2Bxml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNCIgaGVpZ2h0PSIyNCIgdmlld0JveD0iMCAwIDI0IDI0IiBmaWxsPSJub25lIiBzdHJva2U9IndoaXRlIiBzdHJva2Utd2lkdGg9IjIiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCI+PHBhdGggZD0iTTEyIDJMMiA3bDEwIDUgMTAtNS0xMC01eiIvPjxwYXRoIGQ9Ik0yIDE3bDEwIDUgMTAtNU0yIDEybDEwIDUgMTAtNSIvPjwvc3ZnPg==)](https://github.com/01-edu/public/tree/master/subjects/guess-it-2)
 
@@ -12,7 +13,7 @@ A real-time statistical prediction engine written in Go. The program reads a con
 
 - **Streaming Ingestion** — line-by-line `stdin` processing via `bufio.Scanner`.
 - **Sliding Window** — fixed-size (`N = 20`) localized state, adapts to sudden trend changes.
-- **Fixed-Range Split Predictor** — the range half-width is a constant `±20`; the centre is the linear-regression extrapolation while `seen < 1000` and the window median afterwards.
+- **Stateful Running-OLS Predictor** — a `Predictor` struct accumulates a running OLS fit over the full input prefix; from sample 30 onwards it extrapolates `ŷ = m·(n+1) + b` as the range centre with a constant `±20` half-width.
 - **Score-Focused Design** — a constant narrow width maximises score-per-hit: under the audit rule a tight band out-scores a wide one even at a lower hit rate (confirmed by simulation over `docs/data-sets/`).
 - **Safeguards** — `minWidth = 1` guarantees the lower and upper bounds always differ after rounding.
 
@@ -67,30 +68,34 @@ This project ports and extends the statistical foundations built in the `linear-
 
 ### Statistical Implementation
 
-- **Linear Regression Line** — for the current window of `n` values, slope `m` and intercept `b` are fit by the closed-form least-squares solution; the extrapolated next value is `m·n + b`. This centres the range while `seen < 1000`.
-- **Median** — the window median centres the range once `seen ≥ 1000`; it is resistant to extreme outliers and, per the dataset analysis, scores higher than regression in steady state.
-- `Average`, `Variance`, `StdDev`, and `PearsonCorrelation` remain in the `linearstats` package as library surface, computed with numerically stable methods (Welford's algorithm for variance, `IsNaN`/`IsInf` guards in the correlation).
+- **Running OLS** — a `RunningOLS` struct accumulates `(i, yᵢ)` pairs incrementally (O(1) per call) and yields slope `m` and intercept `b` at any point. The extrapolated next value is `m·(n+1) + b`, giving an unbiased centre estimate from sample 30 onwards — eliminating the ~10-unit bias the window median introduced on slope-1 data.
+- **Fallback path** — below 30 samples or when the OLS fit is degenerate, the predictor falls back to the original fixed-range split logic (regression over the 20-point window while `seen < 1000`, window median afterwards), preserving correct behaviour on non-linear datasets.
+- `Average`, `Median`, `Variance`, `StdDev`, `LinearRegression`, and `PearsonCorrelation` remain in the `linearstats` package as library surface, computed with numerically stable methods (Welford's algorithm for variance, `IsNaN`/`IsInf` guards in the correlation).
 
-### Fixed-Range Split Strategy
+### Running-OLS Predictor Strategy
 
 For every input:
 
 ```
-if seen < 1000:
-    m, b   := LinearRegression(window)
-    center := m·len(window) + b
+ols.Add(n, current); n++
+
+if n >= 30 and ols.Fit() succeeds:
+    center := m·n + b          // full-prefix running OLS extrapolation
 else:
-    center := Median(window)
+    // fallback: original fixed-range split
+    if n < 1000:
+        center := m·len(window) + b   // 20-point window regression
+    else:
+        center := Median(window)
 
 print roundBounds(center − 20, center + 20)
 ```
 
-The range half-width is always `20` (width 40). Dataset simulation showed that
-under the audit's `score ∝ 1/width` rule a fixed narrow band out-scores an
-adaptive width on every dataset family — the score-per-hit of a tight range
-outweighs its lower hit rate. The regression centre keeps `linear-stats` in use
-during the warm-up; the median centre takes over for the bulk of the stream
-because it scored higher there.
+The range half-width is always `20` (width 40). The running OLS replaces both the
+window-regression and window-median phases because the window median biases the
+centre ~10 units low on slope-1 data (`y_i ≈ c + i + noise`) — it estimates
+`y_{n-10}` rather than `y_{n+1}`. Running OLS over the full prefix is unbiased
+and stabilises within ~30 samples.
 
 ### Math Reference
 
@@ -113,9 +118,10 @@ Returns `0` whenever the denominator is zero (constant `y`) or intermediate valu
 Constants in [linearstats/predict.go](linearstats/predict.go), locked by
 simulating the predictor over the datasets in `docs/data-sets/`:
 
-- **Sliding Window Size (`WindowSize`):** `20` — values kept for the regression fit and median.
+- **Sliding Window Size (`WindowSize`):** `20` — values kept for the fallback regression fit and median.
 - **Fixed Range (`fixedRange`):** `20` — constant half-width; every predicted range spans 40 units.
-- **Regression Phase Limit (`regressionPhaseLimit`):** `1000` — input count below which the centre is the regression extrapolation; at/above it the centre is the window median.
+- **OLS Min Samples (`olsMinSamples`):** `30` — number of inputs required before the running OLS centre activates; below this the fallback path runs.
+- **Regression Phase Limit (`regressionPhaseLimit`):** `1000` — fallback-path threshold: below this the centre is the window-regression extrapolation; at/above it the centre is the window median.
 - **Minimum Output Width (`minWidth`):** `1` — ensures the lower and upper bound always differ after rounding.
 
 ---
@@ -125,7 +131,8 @@ simulating the predictor over the datasets in `docs/data-sets/`:
 Benchmarked against all eight `guesser` programs in the dockerized tester's
 `ai/` folder, on the real audit datasets **Data 4** and **Data 5** (5 files
 each), scored with the exact `server.js` formula. Student mean score:
-**Data 4 = 102,432 · Data 5 = 100,720**.
+**Data 4 = 102,436 · Data 5 = 101,620**
+([full benchmark](docs/predictor_benchmark_linear_v2.md)).
 
 | Opponent           | D4 file-wins | D5 file-wins | Audit-pass probability\* |
 |--------------------|:------------:|:------------:|:------------------------:|
@@ -134,8 +141,8 @@ each), scored with the exact `server.js` formula. Student mean score:
 | `average`          | 5/5          | 5/5          | ~100 %                   |
 | `median`           | 5/5          | 5/5          | ~100 %                   |
 | `huge-range`       | 5/5          | 5/5          | ~100 %                   |
-| `linear-regr`      | 3/5          | 3/5          | ~65 %                    |
-| `mse`              | 3/5          | 3/5          | ~65 %                    |
+| `linear-regr`      | 3/5          | 5/5          | ~65 % $and$ ~100 %           |
+| `mse`              | 4/5          | 4/5          | ~90 %                    |
 | `nic`              | 3/5          | 3/5          | ~65 %                    |
 
 \* The auditor runs 3 independent rounds per dataset (each picks a random file
@@ -164,9 +171,10 @@ each), scored with the exact `server.js` formula. Student mean score:
   per-file score above what any trend-centred predictor can reach. 3/5 is the
   maximum achievable; the audit's 3-round re-run mechanism covers the rest.
 
-The predictor wins 5/5 against five opponents (~100 % audit-safe) and holds a
-genuine ~65 % shot at each of the three hard ones — with a ~50-line algorithm,
-within 0.3 % of the best configuration that exists.
+The predictor wins 5/5 against five opponents (~100 % audit-safe), 5/5 against
+`linear-regr` on Data 5 (100 % audit-safe), ~90 % against `mse`, and ~65 %
+against `nic` — with a sub-100-line algorithm within 0.3 % of the best
+configuration that exists.
 
 ---
 
@@ -211,8 +219,8 @@ guess-it-2/
 ├── LICENSE                       # MIT license
 ├── README.md                     # This file
 ├── linearstats/                  # Statistical + prediction core
-│   ├── stats.go                  # Average, Median, Variance, StdDev, LinearRegression, PearsonCorrelation
-│   ├── predict.go                # Fixed-range split Predict(), roundBounds(), tuning constants
+│   ├── stats.go                  # Average, Median, Variance, StdDev, LinearRegression, PearsonCorrelation, RunningOLS
+│   ├── predict.go                # Predictor (running-OLS centre), Predict() fallback, roundBounds(), tuning constants
 │   └── linearstats_test.go       # Table-driven stats + predictor coverage (≥ 95 %)
 ├── student/                      # Auditor artefacts
 │   ├── guess-it-2                # Linux/amd64 binary (cross-compiled)
@@ -333,8 +341,9 @@ Each opponent must be tested on both `Data 4` and `Data 5`, 3 runs per dataset.
 - [Edge Cases](docs/edge_cases.md) — streaming and statistical edge cases
 - [Golden Tests](docs/golden_tests.md) — single source of truth for expected behaviour
 - [PRD](docs/PRD.md) — product requirements & architecture (with Mermaid flowchart)
-- [Benchmark Results](docs/benchmark_results.md) — head-to-head scores vs the audit opponents
 - [Predictor Analysis](docs/predictor_analysis.md) — residual-structure proof that 3/5 is the ceiling
+- [Benchmark Results](docs/benchmark_results.md) — head-to-head scores vs the audit opponents
+- [Linear-v2 Benchmark](docs/predictor_benchmark_linear_v2.md) — running-OLS predictor head-to-head results (DS5 vs `linear-regr` 3/5 → 5/5)
 - [Task Cards](tasks/) — implementation breakdown
 - [AI Usage Log](.ai/hmim.ai.log) — record of AI-assisted development sessions
 
