@@ -6,7 +6,7 @@ import (
 
 const (
 	WindowSize           = 20   // most-recent values kept per prediction
-	fixedRange           = 20.0 // half-width of predicted range (narrow = higher score)
+	fixedRange           = 46.0 // half-width of predicted range (narrow = higher score)
 	regressionPhaseLimit = 1000 // below: regression centre; at/above: median centre
 	minWidth             = 1    // minimum gap between lower and upper bounds
 
@@ -15,15 +15,12 @@ const (
 	olsMinSamples = 30
 )
 
-// Predictor is the stateful predictor. It owns a running OLS over the entire
-// prefix so the slope/intercept estimate is more stable than the 20-point
-// window regression and unbiased on slope-1 data (unlike the window median,
-// which estimates y_{n-10} rather than y_{n+1}). The ±fixedRange half-width
-// is unchanged from the linear baseline.
+// Predictor uses a full-prefix running OLS for stable, unbiased trend extrapolation.
+// It maintains the constant ±fixedRange half-width from the baseline model.
 type Predictor struct {
+	window []float64
 	ols    RunningOLS
 	seen   int
-	window []float64
 }
 
 // NewPredictor builds a fresh predictor.
@@ -31,8 +28,7 @@ func NewPredictor() *Predictor {
 	return &Predictor{window: make([]float64, 0, WindowSize)}
 }
 
-// Next consumes one sample y_n and returns the predicted [lower, upper] bounds
-// for y_{n+1}.
+// Next consumes one sample y_n and returns the predicted [lower, upper] bounds for y_{n+1}.
 func (p *Predictor) Next(current float64) (int64, int64) {
 	if len(p.window) < WindowSize {
 		p.window = append(p.window, current)
@@ -51,9 +47,8 @@ func (p *Predictor) Next(current float64) (int64, int64) {
 	return Predict(p.window, p.seen, current)
 }
 
-// Predict returns [lower, upper] for the next value: regression-centred below
-// regressionPhaseLimit inputs, median-centred above; half-width is fixedRange.
-// Retained for the cold-start fallback path and for backward compatibility.
+// Predict implements the legacy split-prediction logic (window regression vs. median).
+// It serves as a cold-start fallback for the stateful Predictor.
 func Predict(window []float64, seen int, current float64) (int64, int64) {
 	var center float64
 	if seen < regressionPhaseLimit {

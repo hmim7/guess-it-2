@@ -165,42 +165,42 @@ func TestPredict(t *testing.T) {
 		{
 			name:   "regression phase: single value centres on itself",
 			window: []float64{250}, seen: 1, current: 250,
-			wantLo: 230, wantHi: 270,
+			wantLo: 204, wantHi: 296,
 		},
 		{
 			name:   "regression phase: perfect upward trend extrapolates",
 			window: []float64{100, 101, 102, 103, 104}, seen: 5, current: 104,
-			wantLo: 85, wantHi: 125, // m=1,b=100 -> centre = 1*5+100 = 105
+			wantLo: 59, wantHi: 151, // m=1,b=100 -> centre = 1*5+100 = 105
 		},
 		{
 			name:   "regression phase: perfect downward trend extrapolates",
 			window: []float64{104, 103, 102, 101, 100}, seen: 5, current: 100,
-			wantLo: 79, wantHi: 119, // m=-1,b=104 -> centre = -1*5+104 = 99
+			wantLo: 53, wantHi: 145, // m=-1,b=104 -> centre = -1*5+104 = 99
 		},
 		{
 			name:   "regression phase: constant window centres on the value",
 			window: []float64{50, 50, 50, 50, 50}, seen: 10, current: 50,
-			wantLo: 30, wantHi: 70,
+			wantLo: 4, wantHi: 96,
 		},
 		{
 			name:   "regression phase: just below the threshold",
 			window: []float64{200, 200, 200, 200}, seen: regressionPhaseLimit - 1, current: 200,
-			wantLo: 180, wantHi: 220,
+			wantLo: 154, wantHi: 246,
 		},
 		{
 			name:   "median phase: odd-length window centres on the median",
 			window: []float64{10, 20, 30, 40, 50}, seen: regressionPhaseLimit, current: 50,
-			wantLo: 10, wantHi: 50, // median = 30
+			wantLo: -16, wantHi: 76, // median = 30
 		},
 		{
 			name:   "median phase: even-length window averages the two middles",
 			window: []float64{10, 20, 30, 40}, seen: regressionPhaseLimit + 500, current: 40,
-			wantLo: 5, wantHi: 45, // median = 25
+			wantLo: -21, wantHi: 71, // median = 25
 		},
 		{
 			name:   "median phase: ignores an extreme outlier",
 			window: []float64{100, 100, 100, 100, 9000}, seen: regressionPhaseLimit, current: 9000,
-			wantLo: 80, wantHi: 120, // median = 100
+			wantLo: 54, wantHi: 146, // median = 100
 		},
 	}
 	for _, tc := range cases {
