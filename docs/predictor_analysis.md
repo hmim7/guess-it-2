@@ -1,6 +1,7 @@
 # Can the Predictor Be Improved to Win 5/5? — Residual-Structure Analysis
 
-**Date:** 2026-05-22
+**Date:** 2026-05-22 · **Corrigendum:** 2026-05-24 (see end of document)
+
 **Question addressed:** the fixed-range split predictor wins 5/5 files against
 five audit opponents but only **3/5** against `linear-regr`, `mse`, and `nic`.
 Can the linear-regression maths be improved to win 5/5 against all of them?
@@ -9,6 +10,17 @@ Can the linear-regression maths be improved to win 5/5 against all of them?
 The regression residuals are white noise, which means the predictor has already
 extracted every predictable signal in the data. 3/5 against `linear-regr` is the
 genuine mathematical ceiling, not a tuning failure.
+
+> **2026-05-24 correction.** The white-noise conclusion is correct but the
+> *Gaussian-shape* assumption it implicitly relied on is wrong. The residuals
+> are iid **uniform on [-50, +50]** (D4 zero outliers; D5 ~0.85% outliers), not
+> Gaussian. Under uniform-bulk noise the integer-rounding score landscape is a
+> sawtooth, not flat — and ±46 is the global maximum, beating ±20 by +2.0%
+> (D4) / +1.6% (D5) and lifting hard-opponent file-wins 22/30 → 25/30. The
+> "no maths left to do" claim in §5 misread the residuals' shape as flat
+> because the window-20 centre noise had inflated their SD past the
+> uniform-bulk signature. See the **Corrigendum** at the end for the corrected
+> distribution and width sweep.
 
 ---
 
@@ -143,3 +155,62 @@ lag4 = −0.039, lag5 = −0.038. White-noise 95 % band ≈ ±0.006 (124,980 sam
 *Reproduce:* `go run _sim/structure.go .resources/guess-it-dockerized/data_sets`
 — computes residuals, autocorrelations, and the AR(1) re-score with the exact
 `server.js` formula.
+
+---
+
+## Corrigendum (2026-05-24)
+
+The §4 residual analysis fit a **window-20** linear regression and reported
+residual SD ≈ 32 (D4) / ≈ 48 (D5). Those SDs are the convolution of the
+underlying residual distribution and the window-20 centre's own variance. A
+later re-analysis fitting a **global OLS** line over each full 12,500-sample
+file ([_sim/noise_dist.go](../_sim/noise_dist.go)) reveals that the underlying
+residuals are not Gaussian:
+
+| file | bulk SD | uniform[-50,+50] SD (50/√3) | outliers (\|r\|>80) | P(\|r\|≤46) measured | P(\|r\|≤46) uniform |
+|------|--------:|----------------------------:|--------:|--------:|--------:|
+| D4/1 | 28.896 | 28.868 | 0 (0.00%) | 0.9198 | 0.9200 |
+| D4/2 | 28.946 | 28.868 | 0 (0.00%) | 0.9163 | 0.9200 |
+| D4/3 | 28.834 | 28.868 | 0 (0.00%) | 0.9208 | 0.9200 |
+| D4/4 | 28.867 | 28.868 | 0 (0.00%) | 0.9194 | 0.9200 |
+| D4/5 | 28.950 | 28.868 | 0 (0.00%) | 0.9199 | 0.9200 |
+| D5/1 | 28.754 | 28.868 | 114 (0.91%) | 0.9093 | 0.9200 |
+| D5/2 | 29.103 | 28.868 | 110 (0.88%) | 0.9078 | 0.9200 |
+| D5/3 | 28.921 | 28.868 | 92 (0.74%) | 0.9116 | 0.9200 |
+| D5/4 | 29.009 | 28.868 | 109 (0.87%) | 0.9102 | 0.9200 |
+| D5/5 | 28.844 | 28.868 | 108 (0.86%) | 0.9156 | 0.9200 |
+
+Data 4 is **pure uniform[-50,+50]**, zero outliers. Data 5 is uniform[-50,+50]
+bulk with ~0.85% outliers (|r| up to ~650). Bulk SD on every file matches
+50/√3 = 28.868 to two decimals.
+
+### What §4 got right, and what it missed
+
+- **iid still holds.** The ACF₁ ≈ −0.009 (and the AR(1)-correction +2-points
+  result) were correct, and they remain correct under uniform-bulk residuals.
+  The error after regression has no temporal memory.
+- **The score landscape is not flat.** The "flat 95k-103k" range was an
+  artefact of the window-20 centre's added variance. Under the running-OLS
+  prefix centre (introduced in linear-v2, σ_ŷ → 0 as the prefix grows), the
+  prediction error stays uniform[-50,+50], and the audit's integer-rounded
+  `round(10⁷/(2h+1)/(N−1))` per-hit scoring produces a sawtooth.
+- **Width was the unexplored axis.** §4 ruled out AR(1), periodic, and
+  "better regression" — all correctly. It did not sweep the half-width past
+  the audit-default ±20. ±46 is the global score-landscape maximum and ±47
+  crosses a per-hit cliff (9→8 pts).
+
+### Implication
+
+The "no maths left to do" verdict applies only to the **centre** of the
+prediction (which is indeed exhausted by OLS over the full prefix). The
+**width** still had room: changing `fixedRange` from 20 to 46 lifts:
+
+- D4 mean score: 102,436 → 104,502 (+2.0%)
+- D5 mean score: 101,620 → 103,246 (+1.6%)
+- Hard-opponent file-wins: 22/30 → 25/30
+- `nic` D5 audit-pass probability: ~65% → ~90%
+- Beats linear-v2 ±20 on every single audit file (10/10).
+
+Full width sweep, rounding-cliff analysis, and head-to-head results in
+[docs/theilsen_benchmark.md §6](theilsen_benchmark.md) and
+[docs/predictor_benchmark_linear_v2.md "Update (2026-05-24)"](predictor_benchmark_linear_v2.md).

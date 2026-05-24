@@ -1,5 +1,18 @@
 # Benchmark Results — guess-it-2 vs Audit Opponents
 
+> **Historical document — superseded.** This is the original 2026-05-22
+> baseline benchmark for the `linear` branch (window-only centre, ±20 width).
+> The current submission is `linear-v3`: running-OLS prefix centre, **±46**
+> width. Current scores and head-to-heads are in
+> [predictor_benchmark_linear_v2.md](predictor_benchmark_linear_v2.md)
+> ("Update (2026-05-24)" section). The §"Why the predictor cannot simply be
+> 'tuned' to win" and §"Scoring-formula rounding quirk" arguments below are
+> **factually wrong** under the corrected residual model — the score landscape
+> is a sawtooth, not flat, and ±46 (not ±20) is the global maximum. See
+> [docs/predictor_analysis.md "Corrigendum (2026-05-24)"](predictor_analysis.md)
+> and [docs/theilsen_benchmark.md §6](theilsen_benchmark.md) for the corrected
+> analysis.
+
 **Date:** 2026-05-22
 **Predictor under test:** fixed-range split — centre on linear-regression
 extrapolation while `seen < 1000`, on the window median afterwards; constant

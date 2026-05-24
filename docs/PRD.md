@@ -8,7 +8,7 @@
 **Differs from guess-it-1 by:**
 - Opponent roster: `big-range`, `linear-regr`, `correlation-coef`, plus bonus `mse` and `nic`.
 - Datasets: `Data 4` and `Data 5` (harder regimes than guess-it-1's Data 1–3).
-- Algorithm: a fixed-range split predictor — `LinearRegression` (reused from the `linear-stats` project) centres a constant ±20 range while `seen < 1000`; the window median centres it afterwards.
+- Algorithm: a stateful running-OLS predictor — `linearstats.RunningOLS` accumulates a fit over the entire prefix and centres a constant ±46 range (width 92) once `seen ≥ 30`; below that, the original window-based `Predict` runs as the warm-up fallback.
 
 **Constraints:**
 - Language: Go (Golang).
@@ -52,37 +52,48 @@ For each numeric input, one line: `lower upper`.
 - **Sliding Window:** Fixed-size window (`N = 20`). On overflow the oldest value is discarded.
 - **Robustness:** Non-numeric lines are silently skipped; state is preserved.
 
-### 4.2 Core Logic — Fixed-Range Split Predictor
+### 4.2 Core Logic — Running-OLS Fixed-Range Predictor
 
-The predictor centres a **constant-width** range on a phase-dependent estimate:
+The predictor centres a **constant-width** range on a running OLS fit over the
+full prefix; below the OLS warm-up threshold it falls back to the original
+window-based split logic:
 
 ```
-if seen < regressionPhaseLimit:        # regressionPhaseLimit = 1000
-    m, b   := LinearRegression(window)
-    center := m * len(window) + b
-else:
-    center := Median(window)
-print roundBounds(center - fixedRange, center + fixedRange)   # fixedRange = 20
+ols.Add(seen, current); seen++
+if seen >= olsMinSamples and ols.Fit() ok:        # olsMinSamples = 30
+    m, b   := ols.Fit()
+    center := m * seen + b                        # running-OLS extrapolation
+else:                                             # warm-up fallback
+    if seen < regressionPhaseLimit:               # regressionPhaseLimit = 1000
+        m, b   := LinearRegression(window)
+        center := m * len(window) + b
+    else:
+        center := Median(window)
+print roundBounds(center - fixedRange, center + fixedRange)   # fixedRange = 46
 ```
 
 **Tuning constants:**
 
 | Constant               | Value | Role |
 |------------------------|-------|------|
-| `WindowSize`           | `20`  | Values kept for the regression fit / median. |
-| `fixedRange`           | `20`  | Constant half-width; every range spans 40 units. |
-| `regressionPhaseLimit` | `1000`| Below it the centre is the regression extrapolation; at/above it, the window median. |
+| `WindowSize`           | `20`  | Values kept for the fallback regression fit / median. |
+| `fixedRange`           | `46`  | Constant half-width; every range spans 92 units. Globally optimal under uniform[-50,+50] residuals + `round(10⁷/(2h+1)/(N−1))` per-hit scoring. |
+| `olsMinSamples`        | `30`  | Prefix size at which the running OLS centre takes over from the warm-up fallback. |
+| `regressionPhaseLimit` | `1000`| Fallback-path threshold: below it the centre is the window-regression extrapolation; at/above it, the window median. |
 | `minWidth`             | `1`   | Minimum output integer width (`upper ≥ lower + 1`). |
 
-**Why a fixed range.** The audit scores a correct prediction higher the narrower
-its range; a miss scores nothing, so expected score per step is
-`hitRate · f(1/width)`. Simulation over `docs/data-sets/` (5 groups × 5 files,
-~12,500 numbers each) showed a constant ±20 out-scores an adaptive
-`c·volatility` width on every dataset — the score-per-hit of a tight band
-outweighs its lower hit rate. With a constant width, score tracks hit rate, and
-the window **median** centred a higher-scoring range than regression in steady
-state; regression centring is kept for the `seen < 1000` warm-up so the
-`linear-stats` calculation is exercised.
+**Why a fixed range, and why ±46.** The audit scores a correct prediction
+`round(10⁷ / (1+width) / (N−1))`; a miss scores nothing, so expected score per
+step is `hitRate · pts/hit`. Residual analysis on the audit data
+([_sim/noise_dist.go](../_sim/noise_dist.go)) showed the noise distribution is
+**uniform on [-50, +50]** (D4 zero outliers; D5 ~0.85% outliers), not Gaussian
+as the prior `linear-v2` analysis assumed. Under uniform residuals the score
+landscape is an integer-rounding sawtooth with local maxima at the largest `h`
+rounding to each per-hit integer (±20→20, ±27→15, ±41→10, ±46→9). ±46 is the
+global maximum because the bulk hit rate saturates at ~92% there, and ±47
+crosses a per-hit cliff (9→8 pts) that costs ~9% of the score. Full sweep and
+rounding-cliff analysis in
+[docs/theilsen_benchmark.md §6](theilsen_benchmark.md).
 
 `LinearRegression` degrades gracefully for tiny windows (`n==1 → (0,data[0])`,
 `n==2 →` exact line), so no separate warm-up branch is needed.
@@ -115,15 +126,15 @@ state; regression centring is kept for the `seen < 1000` warm-up so the
 
 ### 6.1 Golden Tests
 
-All outputs span exactly 40 units (`2 × fixedRange`).
+All outputs span exactly 92 units (`2 × fixedRange`).
 
 | ID   | Scenario | Expected Output |
 |------|----------|-----------------|
-| GT01 | Regression phase, single value `250` (`seen = 1`) | `230 270` (centre = 250) |
-| GT02 | Regression phase, perfect trend `[100,101,102,103,104]` (`seen = 5`) | `85 125` (m=1, b=100 → centre = 105) |
-| GT03 | Regression phase, constant window `[50,50,50,50,50]` | `30 70` (centre = 50) |
-| GT04 | Median phase, window `[10,20,30,40,50]` (`seen ≥ 1000`) | `10 50` (median = 30) |
-| GT05 | Median phase, outlier window `[100,100,100,100,9000]` (`seen ≥ 1000`) | `80 120` (median = 100 ignores the spike) |
+| GT01 | Regression phase, single value `250` (`seen = 1`) | `204 296` (centre = 250) |
+| GT02 | Regression phase, perfect trend `[100,101,102,103,104]` (`seen = 5`) | `59 151` (m=1, b=100 → centre = 105) |
+| GT03 | Regression phase, constant window `[50,50,50,50,50]` | `4 96` (centre = 50) |
+| GT04 | Median phase, window `[10,20,30,40,50]` (`seen ≥ 1000`) | `-16 76` (median = 30) |
+| GT05 | Median phase, outlier window `[100,100,100,100,9000]` (`seen ≥ 1000`) | `54 146` (median = 100 ignores the spike) |
 
 ### 6.2 Audit Cases
 
@@ -156,7 +167,7 @@ stdin ─► Ingestor ─► Sliding Window ─► Analyzer ─► Predictor ─
 | Ingestor   | `bufio.Scanner` over `os.Stdin`; trims and parses each line; skips invalid input. |
 | Window     | Fixed-size `[]float64` (`N = 20`); appends on arrival, evicts oldest on overflow. |
 | Analyzer   | Pure statistical functions over the current window (`LinearRegression`, `Median`). |
-| Predictor  | Centres a constant ±`fixedRange` band on the regression extrapolation (`seen < 1000`) or the window median (`seen ≥ 1000`). |
+| Predictor  | Centres a constant ±`fixedRange` band on the running-OLS extrapolation (`seen ≥ 30`), or on the warm-up fallback (window regression for `seen < 1000`, window median otherwise). |
 | Renderer   | Rounds to integers, enforces `minWidth`, writes `lower upper\n`, flushes immediately. |
 
 
@@ -172,10 +183,14 @@ flowchart TD
     Read --> Parse{"valid float?"}
     Parse -- no --> Read
     Parse -- yes --> Window["Sliding Window N=20<br/>append + evict oldest"]
-    Window --> Phase{"seen < 1000 ?"}
-    Phase -- yes --> Reg["LinearRegression → m, b<br/>center = m·len(window) + b"]
+    Window --> Ols["RunningOLS.Add(seen, current)<br/>seen++"]
+    Ols --> Warm{"seen ≥ 30 ?"}
+    Warm -- yes --> OlsFit["center = m·seen + b<br/>(running OLS over full prefix)"]
+    Warm -- no --> Phase{"seen < 1000 ?"}
+    Phase -- yes --> Reg["LinearRegression(window) → m, b<br/>center = m·len(window) + b"]
     Phase -- no --> Med["center = Median(window)"]
-    Reg --> Round["roundBounds(center − 20, center + 20)<br/>enforce minWidth = 1"]
+    OlsFit --> Round["roundBounds(center − 46, center + 46)<br/>enforce minWidth = 1"]
+    Reg --> Round
     Med --> Round
     Round --> Out["fmt.Fprintf<br/>flush"]
     Out --> Read
@@ -189,7 +204,7 @@ flowchart TD
 |-------|------|
 | 1.  Documentation & Scaffolding | Edge Cases, PRD, tasks/, `.ai/hmim.ai.log`, git bootstrap |
 | 2.  Package Rename | `mathskills` → `linearstats`, drop dead `run.go` |
-| 3.  Hybrid Predictor | Regression + `|r|` blend; multiplier scaling *(superseded)* |
+| 3.  Hybrid Predictor | Regression + `\|r\|` blend; multiplier scaling *(superseded)* |
 | 4.  Dataset Analysis & Fixed-Range Predictor | Simulate over `docs/data-sets/`; replace the hybrid with the fixed-range split model |
 | 5.  Tests & Build | Table-driven coverage ≥ 90 %; Linux binary |
 
@@ -199,7 +214,7 @@ flowchart TD
 
 | Risk | Impact | Mitigation |
 |------|--------|------------|
-| A fixed ±20 hits only ~8–10 % on fast-wandering data (group-9-style) | High | Accepted per the score model — a narrow width compensates; the score check must confirm the predictor still out-scores `big-range`. |
+| A fixed ±46 still misses ~8 % on uniform-bulk audit data, or more on fast-wandering data outside the training regime | Medium | Accepted per the score model — the ±46 width sits at the global sawtooth optimum for the audit data; outside that regime the score check must confirm the predictor still out-scores `big-range`. |
 | The `seen ≥ 1000` median switch is unproven beyond the sample datasets | Medium | Threshold is a single `const`; revisit if audit benchmarks diverge from the simulation. |
 | Real audit Data 4/5 differ from the sampled `docs/data-sets/` regimes | Medium | The fixed-range model is regime-agnostic by design; re-simulate if the auditor exposes new data. |
 | Packaging | High | `student/guess-it-2` binary + executable `script.sh` rebuilt each refactor. |

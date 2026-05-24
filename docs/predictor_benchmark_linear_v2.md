@@ -92,3 +92,90 @@ All criteria from the plan satisfied — `linear-v2` is the new audit submission
   with `NewPredictor()` + `Next(current)`; original `Predict(window, seen, current)`
   retained as the cold-start fallback.
 - [main.go](main.go) — uses `linearstats.NewPredictor()` and `p.Next(v)` per input.
+
+---
+
+## Update (2026-05-24) — `fixedRange` widened from 20 to 46
+
+Subsequent residual analysis ([docs/theilsen_benchmark.md §6](theilsen_benchmark.md)
+and [_sim/noise_dist.go](../_sim/noise_dist.go)) showed the audit-data noise is
+**uniform[-50,+50]** (not Gaussian as the prior predictor_analysis assumed):
+D4 has zero outliers, D5 has ~0.85% outliers. Under this distribution the score
+landscape is a sawtooth set by integer rounding of `round(10⁷/(2h+1)/(N-1))`,
+with local maxima at the largest `h` rounding to each per-hit integer (±20→20,
+±27→15, ±41→10, ±46→9). ±46 is the global maximum — the next half-width (±47)
+crosses a rounding cliff (per-hit 9→8) that destroys 9% of the score.
+
+Single-constant change in [linearstats/predict.go](../linearstats/predict.go):
+`fixedRange = 20.0` → `fixedRange = 46.0`. No other code change.
+
+### Result (running OLS + ±46, exact `server.js` scoring via `_sim/running_ols_sweep.go`)
+
+```
+########## DATA 4  (files 1-5) ##########
+student               104643     104274     104508     104508     104580   mean=104502
+-------------------------------------------------------------------------
+big-range              49992W     49996W     49996W     49996W     49996W  mean=49995 studentWins=5/5
+linear-regr           102300W    100750W    104532L    101680W    101618W  mean=102176 studentWins=4/5
+correlation-coef       95076W     94392W     93442W     92226W     93670W  mean=93761 studentWins=5/5
+mse                   100392W    101727W     97989W    100659W    104130W  mean=100979 studentWins=5/5
+nic                   111200L     98400W    106400L     88800W     97600W  mean=100480 studentWins=3/5
+
+########## DATA 5  (files 1-5) ##########
+student               103122     103131     103266     103077     103635   mean=103246
+-------------------------------------------------------------------------
+big-range              49140W     49168W     49280W     49152W     49172W  mean=49182 studentWins=5/5
+linear-regr           100006W     99696W     99448W     97216W    101370W  mean=99547 studentWins=5/5
+correlation-coef       89566W     86830W     89718W     89376W     88654W  mean=88828 studentWins=5/5
+mse                    92115W    107067L     96921W     94785W    100392W  mean=98256 studentWins=4/5
+nic                    93600W     88000W    108000L    102400W     98400W  mean=98080 studentWins=4/5
+```
+
+`average`, `median`, `huge-range` remain 5/5 — those opponents score in the
+hundreds, so any sensible band crushes them.
+
+### Comparison vs `linear-v2` (±20) baseline
+
+| Metric                     | linear-v2 (±20) | linear-v3 (±46) | Δ          |
+|----------------------------|----------------:|----------------:|-----------:|
+| Mean Data 4                | 102,436         | **104,502**     | **+2,066** |
+| Mean Data 5                | 101,620         | **103,246**     | **+1,626** |
+| Wins vs `linear-regr` D4   | 3/5             | **4/5**         | **+1**     |
+| Wins vs `linear-regr` D5   | 5/5             | 5/5             | =          |
+| Wins vs `mse` D4           | 4/5             | **5/5**         | **+1**     |
+| Wins vs `mse` D5           | 4/5             | 4/5             | =          |
+| Wins vs `nic` D4           | 3/5             | 3/5             | =          |
+| Wins vs `nic` D5           | 3/5             | **4/5**         | **+1**     |
+| Wins vs easy opponents     | 5/5             | 5/5             | =          |
+| Hard-opponent file-wins    | 22/30           | **25/30**       | **+3**     |
+| Wins vs linear-v2 itself   | —               | 10/10           | —          |
+
+### Audit pass probabilities (3-round audit, need ≥ 2 wins)
+
+| Opponent          | linear-v2 pass% | linear-v3 pass% |
+|-------------------|----------------:|----------------:|
+| big-range         | 100%            | 100%            |
+| correlation-coef  | 100%            | 100%            |
+| linear-regr D4    | ~65%            | **~90%**        |
+| linear-regr D5    | 100%            | 100%            |
+| mse D4            | ~90%            | **100%**        |
+| mse D5            | ~90%            | ~90%            |
+| nic D4            | ~65%            | ~65%            |
+| nic D5            | ~65%            | **~90%**        |
+
+The two remaining sub-100% cases (`nic` D4, `mse` D5) are bounded by individual
+opponent files scoring above any uniform-bulk centred predictor's ceiling
+(`nic` D4/1 = 111,200; `mse` D5/2 = 107,067). These are arithmetically
+unreachable, not tuning losses.
+
+### Why this change is safe
+
+- **Single constant.** No new code paths, no new state, no impact on
+  cold-start or fallback logic — `Predict` and `Predictor.Next` are unchanged
+  beyond the half-width.
+- **Beats linear-v2 on every single file** (10/10), so reverting is never a
+  win.
+- **Tests updated** ([linearstats/linearstats_test.go](../linearstats/linearstats_test.go)
+  golden lo/hi values shifted by ±26); `go test ./...` passes.
+- **The rounding cliff at ±47 is structural** — same `server.js` formula in
+  the simulator and the audit, so the optimum holds at runtime too.

@@ -7,14 +7,14 @@
 ![Coverage](https://img.shields.io/badge/Coverage-96.3%25-2ECC71?&labelColor=181717&style=for-the-badge&logo=codecov&logoColor=white)
 [![Zone01](https://img.shields.io/badge/zone01-Athens-916ADE?&labelColor=181717&style=for-the-badge&logo=data:image/svg%2Bxml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNCIgaGVpZ2h0PSIyNCIgdmlld0JveD0iMCAwIDI0IDI0IiBmaWxsPSJub25lIiBzdHJva2U9IndoaXRlIiBzdHJva2Utd2lkdGg9IjIiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCI+PHBhdGggZD0iTTEyIDJMMiA3bDEwIDUgMTAtNS0xMC01eiIvPjxwYXRoIGQ9Ik0yIDE3bDEwIDUgMTAtNU0yIDEybDEwIDUgMTAtNSIvPjwvc3ZnPg==)](https://github.com/01-edu/public/tree/master/subjects/guess-it-2)
 
-A real-time statistical prediction engine written in Go. The program reads a continuous stream of numbers from standard input and predicts the range `[lower, upper]` where the *next* number will fall. `guess-it-2` extends `guess-it-1` by using `LinearRegression` from the `linear-stats` project to centre a deliberately narrow, **fixed-width** prediction range — a design tuned for the audit's "smaller correct range scores higher" rule.
+A real-time statistical prediction engine written in Go. The program reads a continuous stream of numbers from standard input and predicts the range `[lower, upper]` where the *next* number will fall. `guess-it-2` extends `guess-it-1` by using a **running OLS fit over the full input prefix** to centre a **fixed ±46 half-width** prediction range — a design empirically tuned to the audit's "smaller correct range scores higher" rule under the data's uniform[-50,+50] residual distribution.
 
 ## Features
 
 - **Streaming Ingestion** — line-by-line `stdin` processing via `bufio.Scanner`.
 - **Sliding Window** — fixed-size (`N = 20`) localized state, adapts to sudden trend changes.
-- **Stateful Running-OLS Predictor** — a `Predictor` struct accumulates a running OLS fit over the full input prefix; from sample 30 onwards it extrapolates `ŷ = m·(n+1) + b` as the range centre with a constant `±20` half-width.
-- **Score-Focused Design** — a constant narrow width maximises score-per-hit: under the audit rule a tight band out-scores a wide one even at a lower hit rate (confirmed by simulation over `docs/data-sets/`).
+- **Stateful Running-OLS Predictor** — a `Predictor` struct accumulates a running OLS fit over the full input prefix; from sample 30 onwards it extrapolates `ŷ = m·(n+1) + b` as the range centre with a constant `±46` half-width.
+- **Rounding-Cliff-Tuned Width** — the audit data has uniform[-50,+50] residual noise (verified by [_sim/noise_dist.go](_sim/noise_dist.go)). Under `server.js`'s `round(10⁷/(2h+1)/(N-1))` per-hit formula, ±46 is the largest half-width that still rounds to 9 pts/hit while capturing ~92% of the bulk. ±47 crosses a per-hit cliff (9→8) that costs ~9% of the score.
 - **Safeguards** — `minWidth = 1` guarantees the lower and upper bounds always differ after rounding.
 
 ## Installation
@@ -54,9 +54,9 @@ go run .
 ```console
 >$ ./student/script.sh
 189      --> standard input
-120 200  --> range for the next input (in this case for the number 113)
+146 226  --> range for the next input (centred on 186 ±46)
 113      --> standard input
-160 230  --> range for the next input
+134 226  --> range for the next input
 ...
 ```
 
@@ -88,14 +88,38 @@ else:
     else:
         center := Median(window)
 
-print roundBounds(center − 20, center + 20)
+print roundBounds(center − 46, center + 46)
 ```
 
-The range half-width is always `20` (width 40). The running OLS replaces both the
-window-regression and window-median phases because the window median biases the
-centre ~10 units low on slope-1 data (`y_i ≈ c + i + noise`) — it estimates
+The range half-width is always `46` (width 92). The running OLS replaces both
+the window-regression and window-median phases because the window median biases
+the centre ~10 units low on slope-1 data (`y_i ≈ c + i + noise`) — it estimates
 `y_{n-10}` rather than `y_{n+1}`. Running OLS over the full prefix is unbiased
 and stabilises within ~30 samples.
+
+### Why ±46 and not ±20
+
+The audit data on both Data 4 and Data 5 has residuals that are **uniform on
+[-50, +50]** (D4: zero outliers; D5: ~0.85% outliers up to |r|≈650). With the
+running-OLS-prefix centre the prediction error stays uniform[-50,+50], so the
+hit rate at half-width `h` is `min(h/50, 1)` exactly. The audit score per hit
+is `round(10⁷/(2h+1)/(N-1))`; for N=12,500 this is a step function in `h`:
+
+| h  | width 2h | hit % | round((10⁷/(2h+1))/(N−1)) | per-step value |
+|---:|---------:|------:|--------------------------:|---------------:|
+| 20 | 40       | 40 %  | round(19.514) = **20**    | 0.40 · 20 = 8.00 |
+| 27 | 54       | 54 %  | round(14.551) = **15**    | 0.54 · 15 = 8.10 |
+| 41 | 82       | 82 %  | round( 9.638) = **10**    | 0.82 · 10 = 8.20 |
+| **46** | **92** | **92 %** | round( 8.603) = **9** | **0.92 · 9 = 8.28** |
+| 47 | 94       | 94 %  | round( 8.422) = **8** (cliff) | 0.94 · 8 = 7.52 |
+
+The score landscape is a sawtooth, not flat. Local maxima sit at the **largest
+half-width still rounding to a given per-hit integer** (±20, ±27, ±41, ±46).
+±46 is the global maximum because the uniform-bulk hit rate saturates at ~92 %
+inside [−46, +46], and the very next step (±47) crosses a per-hit cliff
+(9→8 points) that 2 percentage points of extra coverage cannot recover. Choice
+of half-width must be exact — ±45 and ±47 both regress vs ±46. Full sweep and
+empirical confirmation in [docs/theilsen_benchmark.md §6](docs/theilsen_benchmark.md).
 
 ### Math Reference
 
@@ -119,7 +143,7 @@ Constants in [linearstats/predict.go](linearstats/predict.go), locked by
 simulating the predictor over the datasets in `docs/data-sets/`:
 
 - **Sliding Window Size (`WindowSize`):** `20` — values kept for the fallback regression fit and median.
-- **Fixed Range (`fixedRange`):** `20` — constant half-width; every predicted range spans 40 units.
+- **Fixed Range (`fixedRange`):** `46` — constant half-width; every predicted range spans 92 units. Sits at the global maximum of the audit's sawtooth score landscape (see *Methodology & Math* above).
 - **OLS Min Samples (`olsMinSamples`):** `30` — number of inputs required before the running OLS centre activates; below this the fallback path runs.
 - **Regression Phase Limit (`regressionPhaseLimit`):** `1000` — fallback-path threshold: below this the centre is the window-regression extrapolation; at/above it the centre is the window median.
 - **Minimum Output Width (`minWidth`):** `1` — ensures the lower and upper bound always differ after rounding.
@@ -131,50 +155,56 @@ simulating the predictor over the datasets in `docs/data-sets/`:
 Benchmarked against all eight `guesser` programs in the dockerized tester's
 `ai/` folder, on the real audit datasets **Data 4** and **Data 5** (5 files
 each), scored with the exact `server.js` formula. Student mean score:
-**Data 4 = 102,436 · Data 5 = 101,620**
+**Data 4 = 104,502 · Data 5 = 103,246**
 ([full benchmark](docs/predictor_benchmark_linear_v2.md)).
 
 | Opponent           | D4 file-wins | D5 file-wins | Audit-pass probability\* |
 |--------------------|:------------:|:------------:|:------------------------:|
-| `big-range`        | 5/5          | 5/5          | ~100 %                   |
-| `correlation-coef` | 5/5          | 5/5          | ~100 %                   |
-| `average`          | 5/5          | 5/5          | ~100 %                   |
-| `median`           | 5/5          | 5/5          | ~100 %                   |
-| `huge-range`       | 5/5          | 5/5          | ~100 %                   |
-| `linear-regr`      | 3/5          | 5/5          | ~65 % $and$ ~100 %           |
-| `mse`              | 4/5          | 4/5          | ~90 %                    |
-| `nic`              | 3/5          | 3/5          | ~65 %                    |
+| `big-range`        | 5/5          | 5/5          | 100%                   |
+| `correlation-coef` | 5/5          | 5/5          | 100%                   |
+| `average`          | 5/5          | 5/5          | 100%                   |
+| `median`           | 5/5          | 5/5          | 100%                   |
+| `huge-range`       | 5/5          | 5/5          | 100%                   |
+| `linear-regr`      | 4/5          | 5/5          | ~90 %  \|  100%       |
+| `mse`              | 5/5          | 4/5          | 100%  \|  ~90 %       |
+| `nic`              | 3/5          | 4/5          | ~65 %  \|  ~90 %        |
 
 \* The auditor runs 3 independent rounds per dataset (each picks a random file
 1–5) and needs ≥ 2 wins. With 5/5 winning files the pass is certain; with 3/5,
 `P(win ≥ 2 of 3) ≈ 65 %`.
 
-### Why the fixed-range split predictor is the best implementation
+### Why this predictor is the best implementation
 
-- **Score depends on centre accuracy, not range width.** Because
-  `hitRate ≈ density·(1 + width)`, the width cancels out of the expected score —
-  the only real lever is placing the centre on the trend, which linear
-  regression and the median already do.
-- **The regression residuals are white noise** (lag-1 autocorrelation ≈ −0.009).
-  A predictor that leaves white residuals has extracted every predictable
-  signal; no error model — AR(1), periodic, or adaptive-width — can add value
-  ([predictor_analysis.md](docs/predictor_analysis.md)).
-- **Simpler and "smarter" alternatives were benchmarked and lost.** An adaptive
-  residual-StdDev width crashed to ~61k; a narrow-sniper `±0.5` band scored a
-  higher raw mean but lopsided, audit-unsafe file-wins; an adaptive
-  empirical-error interval search overfit the noise and fell ~7 % behind
-  ([benchmark_results.md](docs/benchmark_results.md),
-  [adaptive_interval_eval.md](docs/adaptive_interval_eval.md)).
-- **The remaining 3/5 opponents are a structural ceiling, not a weakness.**
-  `linear-regr` and `mse` are least-squares regression — mirrors of this
-  predictor's own strategy, so each file is a fair coin flip. `nic` posted a
-  per-file score above what any trend-centred predictor can reach. 3/5 is the
-  maximum achievable; the audit's 3-round re-run mechanism covers the rest.
+- **Centre is unbiased & noise-free at the limit.** Running OLS over the full
+  prefix has prediction variance `σ²_ε/n → 0` — after ~30 samples the centre
+  contributes <2 units of noise on top of the residual error, so the
+  prediction error stays essentially the underlying uniform[-50,+50] noise.
+- **±46 is the global maximum of the sawtooth score landscape.** Under uniform
+  residuals + integer-rounded `round(10⁷/(2h+1)/(N−1))` per-hit scoring, the
+  landscape has local maxima at every "last half-width before the per-hit
+  integer drops" (±20→20pts, ±27→15pts, ±41→10pts, ±46→9pts). ±46 wins
+  because the bulk hit rate saturates at ~92 % there, and the next step
+  crosses a 9→8 cliff that 2 percentage points of extra coverage cannot
+  recover. See [docs/theilsen_benchmark.md §6](docs/theilsen_benchmark.md) for
+  the full width sweep and rounding-cliff analysis.
+- **Centre estimator choice doesn't matter.** Theil-Sen at the same width
+  scores within 0.5 % of OLS — robust regression has nothing to do because
+  the residuals are iid uniform, not outlier-contaminated
+  ([docs/theilsen_benchmark.md §§ 1-5](docs/theilsen_benchmark.md)).
+- **Adaptive widths overfit.** Empirical-error interval search and
+  adaptive-width experiments all lost: width estimation introduces variance
+  that the iid-uniform noise structure does not reward.
+- **The remaining 3/5 vs `nic` D4 is a structural ceiling.** `nic` posted
+  `nic D4/1 = 111,200` and `D4/3 = 106,400` — both above the uniform-bulk
+  ceiling for any trend-centred fixed-width predictor (~104,500). 3/5 is the
+  maximum achievable on that dataset; the audit's 3-round re-run covers the
+  rest.
 
-The predictor wins 5/5 against five opponents (~100 % audit-safe), 5/5 against
-`linear-regr` on Data 5 (100 % audit-safe), ~90 % against `mse`, and ~65 %
-against `nic` — with a sub-100-line algorithm within 0.3 % of the best
-configuration that exists.
+The predictor wins 5/5 against all five easy opponents (100% audit-safe),
+4/5 against `linear-regr` D4 (~90 %), 5/5 against `linear-regr` D5 and `mse`
+D4 (100%), 4/5 against `mse` D5 and `nic` D5 (~90 %), and 3/5 against
+`nic` D4 (~65 %) — beating the prior `linear-v2` ±20 baseline on every single
+audit file (10/10).
 
 ---
 
@@ -342,8 +372,8 @@ Each opponent must be tested on both `Data 4` and `Data 5`, 3 runs per dataset.
 - [Golden Tests](docs/golden_tests.md) — single source of truth for expected behaviour
 - [PRD](docs/PRD.md) — product requirements & architecture (with Mermaid flowchart)
 - [Predictor Analysis](docs/predictor_analysis.md) — residual-structure proof that 3/5 is the ceiling
-- [Benchmark Results](docs/benchmark_results.md) — head-to-head scores vs the audit opponents
 - [Linear-v2 Benchmark](docs/predictor_benchmark_linear_v2.md) — running-OLS predictor head-to-head results (DS5 vs `linear-regr` 3/5 → 5/5)
+- [Theilsen Benchmark](docs/theilsen_benchmark.md) — theil-sen predictor head-to-head scores vs running-OLS predictor and the audit opponents
 - [Task Cards](tasks/) — implementation breakdown
 - [AI Usage Log](.ai/hmim.ai.log) — record of AI-assisted development sessions
 
