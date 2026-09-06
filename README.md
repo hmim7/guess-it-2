@@ -260,9 +260,7 @@ guess-it-2/
 │   ├── audit_cases.md            # Audit procedure & success criteria
 │   ├── edge_cases.md             # Streaming / statistical edge cases
 │   └── golden_tests.md           # Single source of truth for expected outputs
-├── tasks/                        # Implementation task cards (01-11)
-└── .ai/
-    └── hmim.ai.log               # AI-assisted development log
+└── tasks/                        # Implementation task cards (01-11)
 ```
 
 ---
@@ -375,7 +373,6 @@ Each opponent must be tested on both `Data 4` and `Data 5`, 3 runs per dataset.
 - [Linear-v2 Benchmark](docs/predictor_benchmark_linear_v2.md) — running-OLS predictor head-to-head results (DS5 vs `linear-regr` 3/5 → 5/5)
 - [Theilsen Benchmark](docs/theilsen_benchmark.md) — theil-sen predictor head-to-head scores vs running-OLS predictor and the audit opponents
 - [Task Cards](tasks/) — implementation breakdown
-- [AI Usage Log](.ai/hmim.ai.log) — record of AI-assisted development sessions
 
 ---
 
